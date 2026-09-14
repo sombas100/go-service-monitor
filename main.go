@@ -35,11 +35,20 @@ func main() {
 		"https://example.com",
 		"https://google.com",
 		"https://github.com",
+		"https://interlu.io",
+		"https://interlu.io",
+		"https://interlu.io",
+		"https://interlu.io",
+		"https://interlu.io",
+		"https://interlu.io",
+		"https://interlu.io",
+		"https://interlu.io",
+		"https://interlu.iox",
 	}
 
 	monitor := &Monitor{
 		Client:           &http.Client{},
-		Timeout:          2 * time.Second,
+		Timeout:          10 * time.Second,
 		HealthyThreshold: 1 * time.Second,
 	}
 
@@ -60,8 +69,16 @@ func main() {
 		go worker(ctx, monitor, jobs, results, &wg)
 	}
 
+enqueueJobs:
 	for _, url := range urls {
-		jobs <- url
+
+		select {
+		case <-ctx.Done():
+			break enqueueJobs
+
+		case jobs <- url:
+		}
+
 	}
 
 	close(jobs)
