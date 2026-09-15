@@ -3,7 +3,9 @@ package main
 import (
 	// "cloudmonitor/resource"
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -20,6 +22,8 @@ type Monitor struct {
 	Client           *http.Client
 	Timeout          time.Duration
 	HealthyThreshold time.Duration
+	MaxRetries       int
+	RetryDelay       time.Duration
 }
 
 type Result struct {
@@ -35,14 +39,6 @@ func main() {
 		"https://example.com",
 		"https://google.com",
 		"https://github.com",
-		"https://interlu.io",
-		"https://interlu.io",
-		"https://interlu.io",
-		"https://interlu.io",
-		"https://interlu.io",
-		"https://interlu.io",
-		"https://interlu.io",
-		"https://interlu.io",
 		"https://interlu.iox",
 	}
 
@@ -50,6 +46,8 @@ func main() {
 		Client:           &http.Client{},
 		Timeout:          10 * time.Second,
 		HealthyThreshold: 1 * time.Second,
+		MaxRetries:       3,
+		RetryDelay:       500 * time.Millisecond,
 	}
 
 	workerCount := 3
@@ -103,6 +101,36 @@ enqueueJobs:
 }
 
 func (m *Monitor) Check(ctx context.Context, url string) Result {
+
+	for attempt := 0; attempt <= m.MaxRetries; attempt++ {
+		fmt.Println("Checking:", url, "attempt:", attempt)
+		result := m.checkOnce(ctx, url)
+
+		if ctx.Err() != nil {
+			return result
+		}
+
+		if !shouldRetry(result) {
+			return result
+		}
+
+		if attempt == m.MaxRetries {
+			return result
+		}
+
+		delay := m.RetryDelay * time.Duration(1<<attempt)
+
+		select {
+		case <-ctx.Done():
+			return result
+		case <-time.After(delay):
+		}
+	}
+	return Result{}
+}
+
+func (m *Monitor) checkOnce(ctx context.Context, url string) Result {
+
 	requestCtx, cancel := context.WithTimeout(
 		ctx,
 		m.Timeout,
@@ -177,6 +205,22 @@ func worker(ctx context.Context, monitor *Monitor, jobs <-chan string, results c
 		}
 	}
 
+}
+
+func shouldRetry(result Result) bool {
+	var dnsErr *net.DNSError
+	if errors.As(result.Err, &dnsErr) && dnsErr.IsNotFound {
+		return false
+	}
+	if result.StatusCode >= 500 {
+		return true
+	}
+
+	if errors.Is(result.Err, context.DeadlineExceeded) {
+		return true
+	}
+
+	return false
 }
 
 // func inspectResource(resource Monitor) {
