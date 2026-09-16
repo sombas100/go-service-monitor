@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -34,6 +36,13 @@ type Result struct {
 	Err        error
 }
 
+type Config struct {
+	Timeout          time.Duration
+	HealthyThreshold time.Duration
+	MaxRetries       int
+	RetryDelay       time.Duration
+}
+
 func main() {
 	urls := []string{
 		"https://example.com",
@@ -41,13 +50,21 @@ func main() {
 		"https://github.com",
 		"https://interlu.iox",
 	}
+	config, err := loadConfig()
+	if err != nil {
+		slog.Error(
+			"failed to load configuration",
+			"error", err,
+		)
+		os.Exit(1)
+	}
 
 	monitor := &Monitor{
 		Client:           &http.Client{},
-		Timeout:          10 * time.Second,
-		HealthyThreshold: 1 * time.Second,
-		MaxRetries:       3,
-		RetryDelay:       500 * time.Millisecond,
+		Timeout:          config.Timeout,
+		HealthyThreshold: config.HealthyThreshold,
+		MaxRetries:       config.MaxRetries,
+		RetryDelay:       config.RetryDelay,
 	}
 
 	workerCount := 3
@@ -103,7 +120,7 @@ enqueueJobs:
 func (m *Monitor) Check(ctx context.Context, url string) Result {
 
 	for attempt := 0; attempt <= m.MaxRetries; attempt++ {
-		fmt.Println("Checking:", url, "attempt:", attempt)
+		slog.Info("Checking service...", "url", url, "attempt", attempt)
 		result := m.checkOnce(ctx, url)
 
 		if ctx.Err() != nil {
@@ -115,10 +132,25 @@ func (m *Monitor) Check(ctx context.Context, url string) Result {
 		}
 
 		if attempt == m.MaxRetries {
+			slog.Error(
+				"Service check failed after retries",
+				"url", url,
+				"attempts", attempt+1,
+				"status", result.StatusCode,
+				"error", result.Err,
+			)
 			return result
 		}
 
 		delay := m.RetryDelay * time.Duration(1<<attempt)
+		slog.Warn(
+			"Service check failed, retrying...",
+			"url", url,
+			"attempt", attempt,
+			"status", result.StatusCode,
+			"error", result.Err,
+			"retry_delay", delay,
+		)
 
 		select {
 		case <-ctx.Done():
@@ -221,6 +253,93 @@ func shouldRetry(result Result) bool {
 	}
 
 	return false
+}
+
+func getDurationEnv(key string, defaultValue time.Duration) (time.Duration, error) {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		return defaultValue, nil
+	}
+
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+
+	return duration, nil
+}
+
+func getIntEnv(key string, defaultValue int) (int, error) {
+	value, exists := os.LookupEnv(key)
+	if !exists {
+		return defaultValue, nil
+	}
+	parsedValue, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", key, err)
+	}
+
+	return parsedValue, nil
+}
+
+func loadConfig() (Config, error) {
+	timeout, err := getDurationEnv("MONITOR_TIMEOUT", 2*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
+	health, err := getDurationEnv("MONITOR_HEALTHY_THRESHOLD", 1*time.Second)
+	if err != nil {
+		return Config{}, err
+	}
+
+	retries, err := getIntEnv("MONITOR_MAX_RETRIES", 3)
+	if err != nil {
+		return Config{}, err
+	}
+
+	delay, err := getDurationEnv("MONITOR_RETRY_DELAY", 500*time.Millisecond)
+	if err != nil {
+		return Config{}, err
+	}
+
+	config := Config{
+		Timeout:          timeout,
+		HealthyThreshold: health,
+		MaxRetries:       retries,
+		RetryDelay:       delay,
+	}
+	err = config.Validate()
+	if err != nil {
+		return Config{}, err
+	}
+	return config, nil
+}
+
+func (c Config) Validate() error {
+	if c.MaxRetries < 0 {
+		return fmt.Errorf("MONITOR_MAX_RETRIES cannot be negative: %d", c.MaxRetries)
+	}
+
+	if c.Timeout <= 0 {
+		return fmt.Errorf("MONITOR_TIMEOUT cannot be 0 or less: %s", c.Timeout)
+	}
+
+	if c.HealthyThreshold <= 0 {
+		return fmt.Errorf(
+			"MONITOR_HEALTHY_THRESHOLD must be greater than 0: %s",
+			c.HealthyThreshold,
+		)
+	}
+
+	if c.RetryDelay <= 0 {
+		return fmt.Errorf(
+			"MONITOR_RETRY_DELAY must be greater than 0: %s",
+			c.RetryDelay,
+		)
+	}
+
+	return nil
 }
 
 // func inspectResource(resource Monitor) {
