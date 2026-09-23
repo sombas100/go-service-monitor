@@ -23,7 +23,6 @@ func worker(ctx context.Context, m *monitor.Monitor, jobs <-chan string, results
 
 			select {
 			case results <- result:
-				// successfully sent result
 
 			case <-ctx.Done():
 				return
